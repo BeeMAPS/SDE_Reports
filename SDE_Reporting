@@ -1,0 +1,572 @@
+import arcpy
+import os
+import csv
+from datetime import datetime
+
+def analyze_geodatabase(gdb_path, output_file=None):
+    """
+    Analyze a geodatabase and generate detailed descriptions of all features.
+    
+    Args:
+        gdb_path (str): Path to the geodatabase
+        output_file (str): Optional path for output file. If None, prints to console.
+    """
+    
+    # Set workspace
+    arcpy.env.workspace = gdb_path
+    
+    # Initialize output storage
+    results = []
+    
+    print(f"Analyzing geodatabase: {gdb_path}")
+    print("=" * 80)
+    
+    try:
+        # Get all feature datasets
+        feature_datasets = arcpy.ListDatasets("", "Feature")
+        
+        # Get standalone feature classes (not in feature datasets)
+        standalone_fcs = arcpy.ListFeatureClasses()
+        
+        # Process feature datasets
+        if feature_datasets:
+            for dataset in feature_datasets:
+                print(f"\nFeature Dataset: {dataset}")
+                print("-" * 50)
+                
+                # Get feature classes within the dataset
+                arcpy.env.workspace = os.path.join(gdb_path, dataset)
+                feature_classes = arcpy.ListFeatureClasses()
+                
+                for fc in feature_classes:
+                    fc_info = analyze_feature_class(fc, dataset)
+                    results.append(fc_info)
+                    print_feature_info(fc_info)
+        
+        # Reset workspace for standalone feature classes
+        arcpy.env.workspace = gdb_path
+        
+        # Process standalone feature classes
+        if standalone_fcs:
+            print(f"\nStandalone Feature Classes:")
+            print("-" * 50)
+            
+            for fc in standalone_fcs:
+                fc_info = analyze_feature_class(fc, None)
+                results.append(fc_info)
+                print_feature_info(fc_info)
+        
+        # Process tables
+        tables = arcpy.ListTables()
+        if tables:
+            print(f"\nTables:")
+            print("-" * 50)
+            
+            for table in tables:
+                table_info = analyze_table(table)
+                results.append(table_info)
+                print_table_info(table_info)
+        
+        # Process rasters
+        rasters = arcpy.ListRasters()
+        if rasters:
+            print(f"\nRaster Datasets:")
+            print("-" * 50)
+            
+            for raster in rasters:
+                raster_info = analyze_raster(raster)
+                results.append(raster_info)
+                print_raster_info(raster_info)
+        
+        # Export results if output file specified
+        if output_file:
+            export_to_csv(results, output_file)
+            print(f"\nResults exported to: {output_file}")
+        
+        return results
+        
+    except Exception as e:
+        print(f"Error analyzing geodatabase: {str(e)}")
+        return None
+
+def get_editor_tracking_info(dataset_name):
+    """Get editor tracking information for a dataset (feature class or table)."""
+
+    try:
+        desc = arcpy.Describe(dataset_name)
+
+        # Initialize editor tracking info
+        editor_info = {
+            'editor_tracking_enabled': False,
+            'editor_tracking_fields': [],
+            'creator_field': None,
+            'created_at_field': None,
+            'editor_field': None,
+            'edited_at_field': None,
+            'time_in_utc': False
+        }
+
+        # Check if editor tracking is enabled
+        if hasattr(desc, 'editorTrackingEnabled') and desc.editorTrackingEnabled:
+            editor_info['editor_tracking_enabled'] = True
+
+            # Get editor tracking field names
+            tracking_fields = []
+
+            if hasattr(desc, 'creatorFieldName') and desc.creatorFieldName:
+                editor_info['creator_field'] = desc.creatorFieldName
+                tracking_fields.append(desc.creatorFieldName)
+
+            if hasattr(desc, 'createdAtFieldName') and desc.createdAtFieldName:
+                editor_info['created_at_field'] = desc.createdAtFieldName
+                tracking_fields.append(desc.createdAtFieldName)
+
+            if hasattr(desc, 'editorFieldName') and desc.editorFieldName:
+                editor_info['editor_field'] = desc.editorFieldName
+                tracking_fields.append(desc.editorFieldName)
+
+            if hasattr(desc, 'editedAtFieldName') and desc.editedAtFieldName:
+                editor_info['edited_at_field'] = desc.editedAtFieldName
+                tracking_fields.append(desc.editedAtFieldName)
+
+            editor_info['editor_tracking_fields'] = tracking_fields
+
+            # Check if time is stored in UTC
+            if hasattr(desc, 'isTimeInUTC'):
+                editor_info['time_in_utc'] = desc.isTimeInUTC
+
+        return editor_info
+
+    except Exception as e:
+        print(f"Warning: Could not get editor tracking info for {dataset_name}: {str(e)}")
+        return {
+            'editor_tracking_enabled': False,
+            'editor_tracking_fields': [],
+            'creator_field': None,
+            'created_at_field': None,
+            'editor_field': None,
+            'edited_at_field': None,
+            'time_in_utc': False
+        }
+
+def get_metadata_info(dataset_name):
+    """Get metadata information for a dataset (feature class, table, or raster)."""
+
+    try:
+        # Import metadata module
+        from arcpy import metadata as md
+
+        # Get metadata object
+        item_metadata = md.Metadata(dataset_name)
+
+        # Initialize metadata info
+        metadata_info = {
+            'metadata_title': None,
+            'metadata_summary': None,
+            'metadata_description': None,
+            'metadata_tags': None,
+            'metadata_credits': None,
+            'metadata_access_constraints': None,
+            'metadata_has_content': False
+        }
+
+        # Check if metadata exists and get properties
+        if item_metadata:
+            # Get basic metadata properties
+            metadata_info['metadata_title'] = item_metadata.title if item_metadata.title else None
+            metadata_info['metadata_summary'] = item_metadata.summary if item_metadata.summary else None
+            metadata_info['metadata_description'] = item_metadata.description if item_metadata.description else None
+            metadata_info['metadata_tags'] = item_metadata.tags if item_metadata.tags else None
+            metadata_info['metadata_credits'] = item_metadata.credits if item_metadata.credits else None
+            metadata_info['metadata_access_constraints'] = item_metadata.accessConstraints if item_metadata.accessConstraints else None
+
+            # Check if any metadata content exists
+            metadata_info['metadata_has_content'] = any([
+                metadata_info['metadata_title'],
+                metadata_info['metadata_summary'],
+                metadata_info['metadata_description'],
+                metadata_info['metadata_tags'],
+                metadata_info['metadata_credits'],
+                metadata_info['metadata_access_constraints']
+            ])
+
+        return metadata_info
+
+    except Exception as e:
+        print(f"Warning: Could not get metadata info for {dataset_name}: {str(e)}")
+        return {
+            'metadata_title': None,
+            'metadata_summary': None,
+            'metadata_description': None,
+            'metadata_tags': None,
+            'metadata_credits': None,
+            'metadata_access_constraints': None,
+            'metadata_has_content': False
+        }
+
+def analyze_feature_class(fc_name, dataset_name):
+    """Analyze a feature class and return detailed information."""
+    
+    try:
+        desc = arcpy.Describe(fc_name)
+        
+        # Get basic properties
+        info = {
+            'type': 'Feature Class',
+            'name': fc_name,
+            'dataset': dataset_name if dataset_name else 'Standalone',
+            'geometry_type': desc.shapeType,
+            'feature_count': int(arcpy.GetCount_management(fc_name)[0]),
+            'spatial_reference': desc.spatialReference.name if desc.spatialReference else 'Unknown',
+            'has_z': desc.hasZ,
+            'has_m': desc.hasM,
+            'fields': []
+        }
+        
+        # Get field information
+        fields = arcpy.ListFields(fc_name)
+        for field in fields:
+            field_info = {
+                'name': field.name,
+                'type': field.type,
+                'length': field.length,
+                'precision': field.precision,
+                'scale': field.scale,
+                'nullable': field.isNullable,
+                'required': field.required,
+                'alias': field.aliasName
+            }
+            info['fields'].append(field_info)
+        
+        # Get extent information
+        if desc.extent:
+            info['extent'] = {
+                'xmin': desc.extent.XMin,
+                'ymin': desc.extent.YMin,
+                'xmax': desc.extent.XMax,
+                'ymax': desc.extent.YMax
+            }
+        
+        # Check for indexes
+        indexes = arcpy.ListIndexes(fc_name)
+        info['indexes'] = [idx.name for idx in indexes]
+
+        # Check for editor tracking
+        editor_tracking_info = get_editor_tracking_info(fc_name)
+        info.update(editor_tracking_info)
+
+        # Get metadata information
+        metadata_info = get_metadata_info(fc_name)
+        info.update(metadata_info)
+
+        return info
+        
+    except Exception as e:
+        return {
+            'type': 'Feature Class',
+            'name': fc_name,
+            'dataset': dataset_name,
+            'error': str(e)
+        }
+
+def analyze_table(table_name):
+    """Analyze a table and return detailed information."""
+    
+    try:
+        desc = arcpy.Describe(table_name)
+        
+        info = {
+            'type': 'Table',
+            'name': table_name,
+            'dataset': 'N/A',
+            'record_count': int(arcpy.GetCount_management(table_name)[0]),
+            'fields': []
+        }
+        
+        # Get field information
+        fields = arcpy.ListFields(table_name)
+        for field in fields:
+            field_info = {
+                'name': field.name,
+                'type': field.type,
+                'length': field.length,
+                'precision': field.precision,
+                'scale': field.scale,
+                'nullable': field.isNullable,
+                'required': field.required,
+                'alias': field.aliasName
+            }
+            info['fields'].append(field_info)
+
+        # Check for editor tracking
+        editor_tracking_info = get_editor_tracking_info(table_name)
+        info.update(editor_tracking_info)
+
+        # Get metadata information
+        metadata_info = get_metadata_info(table_name)
+        info.update(metadata_info)
+
+        return info
+        
+    except Exception as e:
+        return {
+            'type': 'Table',
+            'name': table_name,
+            'error': str(e)
+        }
+
+def analyze_raster(raster_name):
+    """Analyze a raster dataset and return detailed information."""
+    
+    try:
+        desc = arcpy.Describe(raster_name)
+        
+        info = {
+            'type': 'Raster',
+            'name': raster_name,
+            'dataset': 'N/A',
+            'format': desc.format,
+            'pixel_type': desc.pixelType,
+            'band_count': desc.bandCount,
+            'compression_type': desc.compressionType,
+            'spatial_reference': desc.spatialReference.name if desc.spatialReference else 'Unknown'
+        }
+        
+        # Get raster properties
+        raster_obj = arcpy.Raster(raster_name)
+        info['cell_size_x'] = raster_obj.meanCellWidth
+        info['cell_size_y'] = raster_obj.meanCellHeight
+        info['width'] = raster_obj.width
+        info['height'] = raster_obj.height
+        
+        # Get extent
+        if desc.extent:
+            info['extent'] = {
+                'xmin': desc.extent.XMin,
+                'ymin': desc.extent.YMin,
+                'xmax': desc.extent.XMax,
+                'ymax': desc.extent.YMax
+            }
+
+        # Get metadata information
+        metadata_info = get_metadata_info(raster_name)
+        info.update(metadata_info)
+
+        return info
+        
+    except Exception as e:
+        return {
+            'type': 'Raster',
+            'name': raster_name,
+            'error': str(e)
+        }
+
+def print_feature_info(info):
+    """Print feature class information to console."""
+    
+    if 'error' in info:
+        print(f"  ERROR analyzing {info['name']}: {info['error']}")
+        return
+    
+    print(f"  Name: {info['name']}")
+    if info['type'] == 'Feature Class':
+        print(f"  Type: {info['geometry_type']} Feature Class")
+        print(f"  Features: {info['feature_count']:,}")
+        print(f"  Spatial Reference: {info['spatial_reference']}")
+        print(f"  Has Z: {info['has_z']}, Has M: {info['has_m']}")
+    
+    print(f"  Fields ({len(info['fields'])}):")
+    for field in info['fields']:
+        nullable = "NULL" if field['nullable'] else "NOT NULL"
+        print(f"    - {field['name']} ({field['type']}) {nullable}")
+    
+    if 'extent' in info:
+        ext = info['extent']
+        print(f"  Extent: {ext['xmin']:.2f}, {ext['ymin']:.2f}, {ext['xmax']:.2f}, {ext['ymax']:.2f}")
+    
+    if info.get('indexes'):
+        print(f"  Indexes: {', '.join(info['indexes'])}")
+
+    # Print editor tracking information
+    if info.get('editor_tracking_enabled'):
+        print(f"  Editor Tracking: Enabled")
+        if info.get('editor_tracking_fields'):
+            print(f"    Fields: {', '.join(info['editor_tracking_fields'])}")
+        if info.get('creator_field'):
+            print(f"    Creator Field: {info['creator_field']}")
+        if info.get('created_at_field'):
+            print(f"    Created At Field: {info['created_at_field']}")
+        if info.get('editor_field'):
+            print(f"    Editor Field: {info['editor_field']}")
+        if info.get('edited_at_field'):
+            print(f"    Edited At Field: {info['edited_at_field']}")
+        if info.get('time_in_utc') is not None:
+            print(f"    Time in UTC: {info['time_in_utc']}")
+    else:
+        print(f"  Editor Tracking: Disabled")
+
+    # Print metadata information
+    if info.get('metadata_has_content'):
+        print(f"  Metadata: Available")
+        if info.get('metadata_title'):
+            print(f"    Title: {info['metadata_title']}")
+        if info.get('metadata_summary'):
+            summary = info['metadata_summary']
+            print(f"    Summary: {summary[:100]}{'...' if len(summary) > 100 else ''}")
+        if info.get('metadata_tags'):
+            print(f"    Tags: {info['metadata_tags']}")
+        if info.get('metadata_credits'):
+            credits = info['metadata_credits']
+            print(f"    Credits: {credits[:100]}{'...' if len(credits) > 100 else ''}")
+    else:
+        print(f"  Metadata: No content available")
+
+    print()
+
+def print_table_info(info):
+    """Print table information to console."""
+    
+    if 'error' in info:
+        print(f"  ERROR analyzing {info['name']}: {info['error']}")
+        return
+    
+    print(f"  Name: {info['name']}")
+    print(f"  Type: Table")
+    print(f"  Records: {info['record_count']:,}")
+    print(f"  Fields ({len(info['fields'])}):")
+    
+    for field in info['fields']:
+        nullable = "NULL" if field['nullable'] else "NOT NULL"
+        print(f"    - {field['name']} ({field['type']}) {nullable}")
+
+    # Print editor tracking information
+    if info.get('editor_tracking_enabled'):
+        print(f"  Editor Tracking: Enabled")
+        if info.get('editor_tracking_fields'):
+            print(f"    Fields: {', '.join(info['editor_tracking_fields'])}")
+    else:
+        print(f"  Editor Tracking: Disabled")
+
+    # Print metadata information
+    if info.get('metadata_has_content'):
+        print(f"  Metadata: Available")
+        if info.get('metadata_title'):
+            print(f"    Title: {info['metadata_title']}")
+        if info.get('metadata_summary'):
+            summary = info['metadata_summary']
+            print(f"    Summary: {summary[:100]}{'...' if len(summary) > 100 else ''}")
+        if info.get('metadata_tags'):
+            print(f"    Tags: {info['metadata_tags']}")
+        if info.get('metadata_credits'):
+            credits = info['metadata_credits']
+            print(f"    Credits: {credits[:100]}{'...' if len(credits) > 100 else ''}")
+    else:
+        print(f"  Metadata: No content available")
+
+    print()
+
+def print_raster_info(info):
+    """Print raster information to console."""
+    
+    if 'error' in info:
+        print(f"  ERROR analyzing {info['name']}: {info['error']}")
+        return
+    
+    print(f"  Name: {info['name']}")
+    print(f"  Type: Raster Dataset")
+    print(f"  Format: {info['format']}")
+    print(f"  Pixel Type: {info['pixel_type']}")
+    print(f"  Bands: {info['band_count']}")
+    print(f"  Dimensions: {info['width']} x {info['height']} pixels")
+    print(f"  Cell Size: {info['cell_size_x']:.6f} x {info['cell_size_y']:.6f}")
+    print(f"  Spatial Reference: {info['spatial_reference']}")
+    
+    if 'extent' in info:
+        ext = info['extent']
+        print(f"  Extent: {ext['xmin']:.2f}, {ext['ymin']:.2f}, {ext['xmax']:.2f}, {ext['ymax']:.2f}")
+
+    # Print metadata information
+    if info.get('metadata_has_content'):
+        print(f"  Metadata: Available")
+        if info.get('metadata_title'):
+            print(f"    Title: {info['metadata_title']}")
+        if info.get('metadata_summary'):
+            summary = info['metadata_summary']
+            print(f"    Summary: {summary[:100]}{'...' if len(summary) > 100 else ''}")
+        if info.get('metadata_tags'):
+            print(f"    Tags: {info['metadata_tags']}")
+        if info.get('metadata_credits'):
+            credits = info['metadata_credits']
+            print(f"    Credits: {credits[:100]}{'...' if len(credits) > 100 else ''}")
+    else:
+        print(f"  Metadata: No content available")
+
+    print()
+
+def export_to_csv(results, output_file):
+    """Export results to CSV file."""
+    
+    with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.writer(csvfile)
+        
+        # Write header
+        writer.writerow([
+            'Type', 'Name', 'Dataset', 'Geometry_Type', 'Count',
+            'Spatial_Reference', 'Has_Z', 'Has_M', 'Editor_Tracking',
+            'Editor_Tracking_Fields', 'Archiving_Enabled', 'Versioning_Enabled',
+            'Versioning_Type', 'Registration_ID', 'Field_Names', 'Field_Types',
+            'Metadata_Has_Content', 'Metadata_Title', 'Metadata_Summary',
+            'Metadata_Description', 'Metadata_Tags', 'Metadata_Credits',
+            'Metadata_Access_Constraints'
+        ])
+        
+        # Write data
+        for item in results:
+            if 'error' in item:
+                writer.writerow([item['type'], item['name'], 'ERROR', item['error']])
+                continue
+                
+            field_names = '; '.join([f['name'] for f in item.get('fields', [])])
+            field_types = '; '.join([f['type'] for f in item.get('fields', [])])
+            editor_tracking_fields = '; '.join(item.get('editor_tracking_fields', []))
+            
+            row = [
+                item['type'],
+                item['name'],
+                item.get('dataset', ''),
+                item.get('geometry_type', ''),
+                item.get('feature_count', item.get('record_count', '')),
+                item.get('spatial_reference', ''),
+                item.get('has_z', ''),
+                item.get('has_m', ''),
+                item.get('editor_tracking_enabled', False),
+                editor_tracking_fields,
+                item.get('archiving_enabled', False),
+                item.get('versioning_enabled', False),
+                item.get('versioning_type', ''),
+                item.get('registration_id', ''),
+                field_names,
+                field_types,
+                item.get('metadata_has_content', False),
+                item.get('metadata_title', ''),
+                item.get('metadata_summary', ''),
+                item.get('metadata_description', ''),
+                item.get('metadata_tags', ''),
+                item.get('metadata_credits', ''),
+                item.get('metadata_access_constraints', '')
+            ]
+            writer.writerow(row)
+
+# Example usage
+geodatabaselist = [] #Add your EGDB .sde names here
+database_prefix = r"" #Add your folder where your .sde connections are here
+csv_list = [] #Add the csv naming convention, in order with the gdb list above, for the reports for each EGDB publication.csv for example
+csv_prefix = r"" #Add the final csv naming convention
+
+if __name__ == "__main__":
+    for gdb in geodatabaselist:
+        geodatabase_path = database_prefix + gdb
+        output_csv = csv_prefix + csv_list[geodatabaselist.index(gdb)]
+        print(geodatabase_path, output_csv)
+        results = analyze_geodatabase(geodatabase_path, output_csv)
+        print(f"\nAnalysis complete! Processed {len(results) if results else 0} items.")
